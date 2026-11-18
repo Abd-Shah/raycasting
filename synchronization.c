@@ -3,8 +3,10 @@
 #include <stdbool.h>
 #include <SDL2/SDL.h>
 #include <math.h>
+#include <stdio.h>
 
 #define SYNC_MAX_TRACKED_PLAYERS 8
+#define MAX_EXTRAPOLATION_MS 100
 
 typedef struct
 {
@@ -263,6 +265,114 @@ int Synchronization_ProcessPlayers(
                     history->previous_state.angle,
                     history->newest_state.angle,
                     alpha);
+        }
+
+        return count;
+    }
+
+
+    if (current_mode == SYNC_EXTRAPOLATION)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            PlayerSnapshotHistory *history =
+                GetPlayerHistory(
+                    network_states[i].player_id);
+
+            if (
+                history == NULL ||
+                !history->has_newest ||
+                !history->has_previous)
+            {
+                output_states[i] =
+                    network_states[i];
+
+                continue;
+            }
+
+            Uint32 snapshot_interval =
+                history->newest_time -
+                history->previous_time;
+
+            if (snapshot_interval == 0)
+            {
+                output_states[i] =
+                    history->newest_state;
+
+                continue;
+            }
+
+            float velocity_x =
+                (history->newest_state.x -
+                 history->previous_state.x) /
+                (float)snapshot_interval;
+
+            float velocity_y =
+                (history->newest_state.y -
+                 history->previous_state.y) /
+                (float)snapshot_interval;
+
+            const float PI =
+                3.14159265358979323846f;
+
+            const float TWO_PI =
+                6.28318530717958647692f;
+
+            float angle_difference =
+                history->newest_state.angle -
+                history->previous_state.angle;
+
+            while (angle_difference > PI)
+            {
+                angle_difference -= TWO_PI;
+            }
+
+            while (angle_difference < -PI)
+            {
+                angle_difference += TWO_PI;
+            }
+
+            float angular_velocity =
+                angle_difference /
+                (float)snapshot_interval;
+
+            Uint32 prediction_time =
+                current_time -
+                history->newest_time;
+
+            if (prediction_time > MAX_EXTRAPOLATION_MS)
+            {
+                prediction_time =
+                    MAX_EXTRAPOLATION_MS;
+            }
+
+            output_states[i] =
+                history->newest_state;
+
+            output_states[i].x =
+                history->newest_state.x +
+                velocity_x *
+                    (float)prediction_time;
+
+            output_states[i].y =
+                history->newest_state.y +
+                velocity_y *
+                    (float)prediction_time;
+
+            output_states[i].angle =
+                history->newest_state.angle +
+                angular_velocity *
+                    (float)prediction_time;
+
+            printf(
+                "[EXTRAP] prev=(%.1f, %.1f) newest=(%.1f, %.1f) predicted=(%.1f, %.1f) prediction_time=%u ms\n",
+                history->previous_state.x,
+                history->previous_state.y,
+                history->newest_state.x,
+                history->newest_state.y,
+                output_states[i].x,
+                output_states[i].y,
+                prediction_time);
         }
 
         return count;
