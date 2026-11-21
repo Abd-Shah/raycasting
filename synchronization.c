@@ -8,6 +8,9 @@
 #define SYNC_MAX_TRACKED_PLAYERS 8
 #define MAX_EXTRAPOLATION_MS 100
 
+// Larger values make displayed positions catch up faster
+#define EXPONENTIAL_SMOOTHING_RATE 10.0f
+
 typedef struct
 {
     int player_id;
@@ -23,7 +26,9 @@ typedef struct
     bool active;
     bool has_newest;
     bool has_previous;
-
+    RemotePlayerState smoothed_state;
+    Uint32 smoothing_time;
+    bool has_smoothed;  
 } PlayerSnapshotHistory;
 
 static PlayerSnapshotHistory player_histories[
@@ -82,6 +87,7 @@ static PlayerSnapshotHistory *GetPlayerHistory(
 
             player_histories[i].has_newest = false;
             player_histories[i].has_previous = false;
+            player_histories[i].has_smoothed = false;
 
             return &player_histories[i];
         }
@@ -97,6 +103,14 @@ void Synchronization_SetMode(
     SynchronizationMode mode)
 {
     current_mode = mode;
+
+    for (int i=0; i < SYNC_MAX_TRACKED_PLAYERS; i++)
+    {
+        player_histories[i].active = false;
+        player_histories[i].has_newest = false;
+        player_histories[i].has_previous = false;
+        player_histories[i].has_smoothed = false;
+    }
 }
 
 SynchronizationMode Synchronization_GetMode(void)
@@ -125,6 +139,26 @@ int Synchronization_ProcessPlayers(
     }
 
     Uint32 current_time = SDL_GetTicks();
+
+    // Reuse history slots after players leave.
+    for (int i = 0; i < SYNC_MAX_TRACKED_PLAYERS; i++) 
+    {
+        if (!player_histories[i].active) {
+        continue;
+        }
+        bool present = false;
+        
+        for (int j = 0; j < count; j++)
+        {
+            if (network_states[j].player_id == player_histories[i].player_id)
+            {
+                present = true;
+                break;
+            }
+        }
+        
+        player_histories[i].active = present;
+    }
 
     for (int i = 0; i < count; i++)
     {
@@ -373,6 +407,68 @@ int Synchronization_ProcessPlayers(
                 output_states[i].x,
                 output_states[i].y,
                 prediction_time);
+        }
+
+        return count;
+    }
+
+    //exponential smoothing mode
+    if (current_mode == SYNC_EXPONENTIAL_SMOOTHING)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            PlayerSnapshotHistory *history =
+                GetPlayerHistory(network_states[i].player_id);
+
+            output_states[i] = network_states[i];
+
+            if (history == NULL)
+            {
+                continue;
+            }
+
+            if (!history->has_smoothed)
+            {
+                history->smoothed_state = network_states[i];
+                history->smoothing_time = current_time;
+                history->has_smoothed = true;
+            }
+
+            float elapsed_seconds =
+                (float)(current_time - history->smoothing_time) / 1000.0f;
+
+            history->smoothing_time = current_time;
+
+            float alpha =
+                1.0f - expf(-EXPONENTIAL_SMOOTHING_RATE * elapsed_seconds);
+
+            history->smoothed_state.x +=
+                alpha * (network_states[i].x - history->smoothed_state.x);
+
+            history->smoothed_state.y +=
+                alpha * (network_states[i].y - history->smoothed_state.y);
+
+            history->smoothed_state.angle = InterpolateAngle(
+                history->smoothed_state.angle,
+                network_states[i].angle,
+                alpha);
+
+            output_states[i].x = history->smoothed_state.x;
+            output_states[i].y = history->smoothed_state.y;
+            output_states[i].angle = history->smoothed_state.angle;
+
+            static Uint32 last_exp_log = 0;
+            if (current_time - last_exp_log >= 1000)
+            {
+                printf(
+                    "[EXP_SMOOTH] player_id=%d smoothed=(%.1f, %.1f) newest=(%.1f, %.1f)\n",
+                    network_states[i].player_id,
+                    history->smoothed_state.x,
+                    history->smoothed_state.y,  
+                    network_states[i].x,
+                    network_states[i].y);
+                last_exp_log = current_time;
+            }
         }
 
         return count;

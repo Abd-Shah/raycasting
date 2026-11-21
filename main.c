@@ -200,7 +200,7 @@ int main(int argc, char *argv[])
     Network_Init("ws://localhost:8081");
 
     Synchronization_SetMode(
-        SYNC_EXTRAPOLATION);
+        SYNC_EXPONENTIAL_SMOOTHING); //smoothing test
 
     emscripten_set_mousemove_callback(
         "#canvas",
